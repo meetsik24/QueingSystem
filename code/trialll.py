@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-import briq
+import requests
 import tkinter as tk
 from tkinter import ttk
 import firebase_admin
@@ -9,16 +9,15 @@ import threading
 import socket
 from PIL import Image, ImageTk
 import cv2
-import requests
 import time
 import pygame
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, filename='queue_system.log', format='%(asctime)s - %(message)s')
 
 # Load environment variables from .env file
 load_dotenv()
-
-# Initialize Briq client
-client = briq.Client()
-client.set_api_key(os.getenv("BRIQ_API_KEY"))
 
 queue = []  # Global queue to manage tokens
 last_event_time = {}
@@ -84,6 +83,7 @@ def reset_counter(counter_id):
         'status': 'waiting'
     })
     print(f"Counter {counter_id} has been reset.")
+    logging.info(f"Counter {counter_id} has been reset.")
     counter_index = int(counter_id[-1]) - 1
     token_number_labels[counter_index].config(text="")
 
@@ -95,6 +95,8 @@ def reset_database():
     })
     tokens_ref.set({})
     returned_tokens_ref.set({})
+    print("Database reset.")
+    logging.info("Database reset.")
 
 # Function to handle the "Next" button click or ESP signal
 def handle_next_button(counter_id):
@@ -108,8 +110,10 @@ def handle_next_button(counter_id):
         send_sms(next_token_data["phone"], f"Your token {next_token} is now being served at {counter_id}.")
 
         print(f"Counter {counter_id} now serving token {next_token}")
+        logging.info(f"Counter {counter_id} now serving token {next_token}")
     else:
         print(f"No tokens in the queue for Counter {counter_id}.")
+        logging.info(f"No tokens in the queue for Counter {counter_id}.")
 
 # Function to mark a token as returned
 def mark_as_returned(counter_id):
@@ -124,6 +128,7 @@ def mark_as_returned(counter_id):
         })
         reset_counter(counter_id)
         print(f"Token {token_number} marked as returned")
+        logging.info(f"Token {token_number} marked as returned")
 
 # Function to serve a returned token
 def serve_returned_token(counter_id):
@@ -135,31 +140,46 @@ def serve_returned_token(counter_id):
                 update_counter(counter_id, int(token_number))
                 returned_tokens_ref.child(token_number).delete()
                 print(f"Counter {counter_id} serving returned token {token_number}")
+                logging.info(f"Counter {counter_id} serving returned token {token_number}")
                 break
 
-# Function to send SMS using Briq
+# Function to send SMS using Briq API with requests
 def send_sms(phone_number, message, max_retries=3):
     try:
         # Ensure phone number is in international format (+255 for Tanzania)
         if not phone_number.startswith("+"):
             phone_number = f"+255{phone_number[-9:]}"
+        
+        url = "https://karibu.briq.tz/v1/message/send-instant"
+        headers = {
+            "X-API-Key": os.getenv("BRIQ_API_KEY"),
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        payload = {
+            "content": message,
+            "recipients": [phone_number],
+            "sender_id": "BRIQ"
+        }
 
         for attempt in range(max_retries):
             try:
-                result = client.message.send_instant(
-                    content=message,
-                    recipients=[phone_number],
-                    sender_id="BRIQ"
-                )
+                response = requests.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                result = response.json()
                 print(f"SMS sent to {phone_number}: {result}")
+                logging.info(f"SMS sent to {phone_number}: {result}")
                 return result
-            except Exception as e:
+            except requests.exceptions.HTTPError as e:
                 if attempt == max_retries - 1:
                     print(f"Failed to send SMS to {phone_number} after {max_retries} attempts: {e}")
+                    print(f"Response: {response.text}")
+                    logging.error(f"Failed to send SMS to {phone_number}: {e}, Response: {response.text}")
                     return None
                 time.sleep(1)
     except Exception as e:
         print(f"Failed to process SMS for {phone_number}: {e}")
+        logging.error(f"Failed to process SMS for {phone_number}: {e}")
         return None
 
 # UDP Listener for ESP32 communication
@@ -169,6 +189,7 @@ def udp_listener():
     port = 12345
     sock.bind((esp32_ip, port))
     print(f"UDP Listener started on {esp32_ip}:{port}.")
+    logging.info(f"UDP Listener started on {esp32_ip}:{port}.")
 
     while True:
         try:
@@ -180,6 +201,7 @@ def udp_listener():
                 token_type = data[14:].decode().strip()
 
                 print(f"Received token: Phone={phone}, Token={token}, Type={token_type}")
+                logging.info(f"Received token: Phone={phone}, Token={token}, Type={token_type}")
 
                 queue.append({"phone": phone, "token": token, "type": token_type})
                 queue.sort(key=lambda x: 0 if x["type"].lower() == "priority" else 1)
@@ -192,8 +214,10 @@ def udp_listener():
                         break
             else:
                 print(f"Incomplete data received (length: {len(data)} bytes)")
+                logging.info(f"Incomplete data received (length: {len(data)} bytes)")
         except Exception as e:
             print(f"UDP Listener error: {e}")
+            logging.error(f"UDP Listener error: {e}")
             continue
 
 # GUI Setup
